@@ -42,14 +42,30 @@ jobs:
           python3 - <<'PY'
           import re, sys, pathlib
           md = pathlib.Path('README.md').read_text(encoding='utf-8')
-          missing = []
+
+          def slug(title):
+              # GitHub 的锚点规则：转小写 → 去掉标点 → 每个空格替换成一个连字符
+              t = title.strip().lower()
+              t = re.sub(r'[^\w\s\u4e00-\u9fff-]', '', t)
+              return re.sub(r'\s', '-', t)
+
+          headings = {slug(m.group(2))
+                      for m in re.finditer(r'^(#{2,6})\s+(.*)$', md, re.M)}
+          anchors = set(re.findall(r'\]\(#([^)]+)\)', md))
+
+          bad_links = []
           for m in re.finditer(r'\]\(([^)#][^)]*)\)', md):
               target = m.group(1).split('#')[0]
               if target and not target.startswith(('http://', 'https://')):
                   if not pathlib.Path(target).exists():
-                      missing.append(target)
-          if missing:
-              print('missing links:', missing)
+                      bad_links.append(target)
+
+          bad_anchors = sorted(anchors - headings)
+          if bad_links or bad_anchors:
+              if bad_links:
+                  print('broken file links:', bad_links)
+              if bad_anchors:
+                  print('broken anchors:', bad_anchors)
               sys.exit(1)
-          print('all relative links OK')
+          print(f'all {len(anchors)} anchors and file links OK')
           PY
