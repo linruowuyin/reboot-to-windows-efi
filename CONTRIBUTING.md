@@ -5,8 +5,8 @@
 ## 开发环境
 
 ```bash
-git clone https://github.com/linruowuyin/boot-windows.git
-cd boot-windows
+git clone https://github.com/linruowuyin/reboot-to-windows-efi.git
+cd reboot-to-windows-efi
 ```
 
 不需要额外的构建步骤 —— `boot-windows` 是单个 Bash 脚本，`install/install.sh` 是安装器。

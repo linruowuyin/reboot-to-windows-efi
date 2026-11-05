@@ -1,12 +1,16 @@
 <div align="center">
 
-# boot-windows
+# reboot-to-windows-efi
 
-**在 Linux 上一键临时切到 Windows —— 不用进 GRUB 菜单手动选。**
+**Reboot to Windows from Linux — one shot, no GRUB menu.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Shell](https://img.shields.io/badge/shell-bash-4.2%2B-blue.svg)](boot-windows)
 [![UEFI](https://img.shields.io/badge/requires-UEFI%20%2B%20efibootmgr-orange.svg)](install/install.sh)
+
+**Linux → Windows 一次性重启 · 基于 EFI BootNext · 无需手动选择 GRUB 菜单**
+
+在 Linux 双系统（dual boot）上，**reboot to Windows** 而不用进 GRUB 菜单手动选。
 
 Linux 始终是你系统的默认启动项。这只是一次性切换：从 Windows 再开机会自动回到 Linux。
 
@@ -14,8 +18,26 @@ Linux 始终是你系统的默认启动项。这只是一次性切换：从 Wind
 
 ---
 
+## 这是什么 / What this is
+
+一个脚本 + 一个桌面按钮，实现 **Linux reboot to Windows**（从 Linux 重启进 Windows）。
+
+关键词：**reboot to windows from linux** · **linux dual boot** · **efi bootnext** · **without grub menu** · **one-time boot** · **一次性切换**
+
+| 你想做的事 | 传统做法 | 本工具 |
+|---|---|---|
+| 临时用一次 Windows | 重启 → 等 GRUB 倒计时 → 按方向键 → 回车 | 点一个按钮 |
+| 会不会改坏默认启动项 | —— | **不会**，从不修改 `BootOrder` |
+| 从 Windows 回来 | 再手动选一次 | **自动回 Linux** |
+| 需要改引导器配置 | 可能要 | 不用，只写一个 EFI 变量 |
+
+> **中文**：在 Linux + Windows 双系统上，一键重启到 Windows。基于 UEFI 的 `BootNext` 变量实现 —— 固件下次启动直接跳转到 Windows，**完全跳过 GRUB 菜单**。Linux 保持在 `BootOrder` 首位，因此从 Windows 再开机会自动回到 Linux。这是一次性切换，不改变默认启动顺序。
+
+---
+
 ## 目录
 
+- [这是什么 / What this is](#这是什么--what-this-is)
 - [它解决什么问题](#它解决什么问题)
 - [工作原理](#工作原理)
 - [为什么不用 systemd 的 boot-loader-entry](#为什么不用-systemd-的-boot-loader-entry)
@@ -132,15 +154,15 @@ No boot loader entries discovered.
 # Arch / CachyOS
 sudo pacman -S efibootmgr
 
-git clone https://github.com/linruowuyin/boot-windows.git
-cd boot-windows
+git clone https://github.com/linruowuyin/reboot-to-windows-efi.git
+cd reboot-to-windows-efi
 ./install/install.sh
 ```
 
 安装脚本的行为：
 
 1. 检查 UEFI 模式与 `efibootmgr` 是否可用
-2. 把 `boot-windows` 安装到 `~/.local/bin/`（可用 `BIN_DIR` 覆盖）
+2. 把脚本安装为 `~/.local/bin/boot-windows`（可用 `BIN_DIR` 覆盖）
 3. 若检测到 Noctalia，自动向其会话菜单追加「重启到 Windows」条目
 4. 幂等：重复运行不会产生重复条目
 
