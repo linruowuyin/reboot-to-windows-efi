@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: bash -n (syntax check)
+        run: |
+          for f in boot-windows install/install.sh; do
+            echo "checking $f"
+            bash -n "$f"
+          done
+
+      - name: shellcheck
+        run: |
+          shellcheck -S warning boot-windows install/install.sh
+
+      - name: Check for accidentally committed secrets
+        run: |
+          # 把扫描模式写进文件，避免匹配到扫描器自身
+          PATTERN='ghp_|github_pat_|BEGIN [A-Z ]*PRIVATE KEY'
+          if grep -rInE "$PATTERN" --exclude-dir=.git \
+               --exclude='ci.yml' .; then
+            echo "::error::possible secret committed"
+            exit 1
+          fi
+          echo "no secrets found"
+
+      - name: Verify README internal links
+        run: |
+          python3 - <<'PY'
+          import re, sys, pathlib
+          md = pathlib.Path('README.md').read_text(encoding='utf-8')
+          missing = []
+          for m in re.finditer(r'\]\(([^)#][^)]*)\)', md):
+              target = m.group(1).split('#')[0]
+              if target and not target.startswith(('http://', 'https://')):
+                  if not pathlib.Path(target).exists():
+                      missing.append(target)
+          if missing:
+              print('missing links:', missing)
+              sys.exit(1)
+          print('all relative links OK')
+          PY

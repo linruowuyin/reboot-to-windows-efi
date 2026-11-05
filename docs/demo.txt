@@ -1,0 +1,9 @@
+$ boot-windows --status
+BootCurrent: 0001
+BootOrder: 0001,0002,2001,2002,2003
+Windows 启动项 = Boot0002
+→ 下次启动按 BootOrder 顺序
+
+$ boot-windows --dry-run
+[dry-run] 将设置 EFI BootNext → Windows
+[dry-run] 随后重启系统
