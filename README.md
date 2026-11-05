@@ -20,7 +20,7 @@ UEFI 固件下次启动时会优先执行 `BootNext` 变量指向的启动项，
 - **一次性**：不影响默认启动顺序，Windows 里重启一次就回 Linux
 - **安全**：如果 `BootNext` 指向的项失效，固件会自动回退到 `BootOrder`（你的 Linux）
 
-> **为什么不�� `systemctl reboot --boot-loader-entry`？**
+> **为什么不用 `systemctl reboot --boot-loader-entry`？**
 > 那个命令只认 systemd-boot / BLS。GRUB 用户用不了（实测报 `No boot loader entries discovered`）。
 > 所以这里走 `efibootmgr --bootnext`。
 
