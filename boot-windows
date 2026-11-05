@@ -1,0 +1,266 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# boot-windows — 从 Linux 一键临时切到 Windows
+#
+#   boot-windows                设置 EFI BootNext → Windows，然后重启（一次性切换）
+#   boot-windows --no-reboot    只设置 BootNext，不重启
+#   boot-windows --gui          GUI 确认（zenity 对话框）+ 通知后重启
+#   boot-windows --status       查看 EFI 启动项 / BootNext 状态
+#   boot-windows --restore      清除 BootNext（下次启动回到 Linux）
+#   boot-windows --dry-run      只显示将要执行的改动，不动任何东西
+#   boot-windows --help         显示帮助
+#
+# ------------------------------------------------------------------------------
+# 为什么用 EFI BootNext
+#   UEFI 固件下次启动时会优先执行 BootNext 变量指向的启动项，用完即弃。
+#   本机是 GRUB + os-prober：手动切 Windows 要等 5 秒倒计时再按方向键；
+#   BootNext 由固件直接跳转，完全跳过 GRUB 菜单，更快也更可靠。
+#
+#   Linux 始终留在 BootOrder 首位，所以从 Windows 再开机会自动回到本机 ——
+#   这就是"临时一次性"，不需要人工干预，也不会改坏默认启动顺序。
+#   如果 BootNext 指向的项失效，固件会安全回退到 BootOrder（Linux）。
+#
+#   注：systemd 的 `systemctl reboot --boot-loader-entry` 在本机无效
+#   （systemd 262 只认 systemd-boot/BLS，本机引导器是 GRUB，实测报
+#    "No boot loader entries discovered"），所以走 BootNext 这条路。
+#
+# ------------------------------------------------------------------------------
+# 权限说明
+#   本机 sudoers 已把 /usr/bin/sh 与 /usr/bin/systemctl 列入 NOPASSWD 白名单，
+#   所以脚本可以免密完成 EFI 变量写入和重启，不需要额外的 root 安装步骤。
+#   若哪天白名单被收紧，脚本会自动回退到交互式 sudo（提示输入密码）。
+#
+# ------------------------------------------------------------------------------
+# 调用方式
+#   命令行直接跑    → 终端里询问 [y/N] 确认
+#   --gui / GUI 菜单 → 用 zenity 弹确认框；无 zenity 时直接执行
+# ==============================================================================
+set -euo pipefail
+
+WIN_PATTERN="Windows Boot Manager"
+WINDOWS_PART="${WINDOWS_PART:-}"                     # 留空 = 自动探测所有 NTFS 分区
+REBOOT_DELAY="${REBOOT_DELAY:-3}"                 # 重启前等待秒数，留出通知显示时间
+
+c_red()    { printf '\033[31m%s\033[0m\n' "$*" >&2; }
+c_green()  { printf '\033[32m%s\033[0m\n' "$*"; }
+c_yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
+
+usage() {
+    # 从文件头的注释块提取帮助文本 —— 按注释块自动截断，不依赖固定行号，
+    # 这样在文件头增删说明不会把 usage 打乱。
+    awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"
+}
+
+notify() {
+    command -v notify-send >/dev/null 2>&1 && \
+        notify-send -a "boot-windows" -u "${2:-normal}" "$1" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# 提权执行
+#   优先用免密 sudo；不可用时回退到交互式（只在真的会提示密码时才回退，
+#   避免把真实故障重复执行一遍）。
+# ---------------------------------------------------------------------------
+run_root() {
+    local out rc
+    if out="$(sudo -n /usr/bin/sh -c "$*" 2>&1)"; then
+        [ -n "$out" ] && printf '%s\n' "$out"
+        return 0
+    fi
+    rc=$?
+    if printf '%s' "$out" | grep -qi "password is required\|a terminal is required"; then
+        sudo /usr/bin/sh -c "$*"
+        return $?
+    fi
+    printf '%s\n' "$out" >&2
+    return "$rc"
+}
+
+# ---------------------------------------------------------------------------
+# EFI 状态读取
+# ---------------------------------------------------------------------------
+bootnum_of() {
+    efibootmgr -v 2>/dev/null | awk -v pat="$1" '
+        /^Boot[0-9A-Fa-f]{4}\*/ {
+            n = substr($1, 5, 4)
+            if (index($0, pat)) { print n; exit }
+        }'
+}
+
+# 定位 Windows 启动项。
+# 优先按描述匹配 "Windows Boot Manager"(英文固件的标准描述)。
+# 部分固件/本地化环境下描述可能不同，退而按启动文件路径匹配
+# Microsoft 自己的 bootmgfw.efi —— 这个更稳定，也不受语言影响。
+find_windows_bootnum() {
+    local n
+    n="$(bootnum_of "$WIN_PATTERN")"
+    if [ -n "$n" ]; then printf '%s\n' "$n"; return 0; fi
+
+    n="$(efibootmgr -v 2>/dev/null | awk '
+        /^Boot[0-9A-Fa-f]{4}\*/ {
+            n = substr($1, 5, 4)
+            low = tolower($0)
+            if (low ~ /bootmgfw\.efi/ || low ~ /microsoft/) { print n; exit }
+        }')"
+    if [ -n "$n" ]; then printf '%s\n' "$n"; return 0; fi
+
+    return 1
+}
+
+current_order() {
+    efibootmgr -v 2>/dev/null | sed -n 's/^BootOrder: *//p' | head -1
+}
+
+current_next() {
+    efibootmgr -v 2>/dev/null | sed -n 's/^BootNext: *//p' | head -1
+}
+
+# ---------------------------------------------------------------------------
+# 操作
+# ---------------------------------------------------------------------------
+do_set_next() {
+    local w
+    w="$(find_windows_bootnum)" || w=""
+    if [ -z "$w" ]; then
+        c_red "efibootmgr 输出里找不到 Windows 启动项。"
+        c_red "当前启动项列表："
+        efibootmgr -v 2>/dev/null | sed -n 's/^\(Boot[0-9A-Fa-f]*\*\?\)/\1/p'
+        return 1
+    fi
+    run_root "efibootmgr --bootnext $w >/dev/null"
+    c_green "BootNext → Boot${w} (Windows)"
+}
+
+do_restore() {
+    run_root "efibootmgr --delete-bootnext >/dev/null 2>&1 || true"
+    c_green "BootNext 已清除，下次启动回到 BootOrder（Linux）"
+}
+
+do_status() {
+    local w nx
+    w="$(find_windows_bootnum)" || w=""
+    nx="$(current_next)"
+    efibootmgr -v 2>/dev/null | grep -E '^(BootNext|BootCurrent|BootOrder):' || true
+    [ -n "$w" ] && printf 'Windows 启动项 = Boot%s\n' "$w"
+    if [ -n "$nx" ]; then
+        printf '→ 下次启动将进入 Boot%s（一次性，用完即失效）\n' "$nx"
+    else
+        printf '→ 下次启动按 BootOrder 顺序\n'
+    fi
+}
+
+# Windows 快速启动(Fast Startup)/休眠会让 NTFS 保持锁定状态，
+# 从 Linux 切过去时可能看到"恢复会话"而不是完整冷启动。
+# 检测 NTFS boot sector 第 4 字节:0x4E = 正常，0xC1 = 处于休眠/快速启动状态。
+# 休眠标记只会落在被休眠的卷上，所以不必精确认出哪个分区是 C: ——
+# 扫一遍所有 NTFS 分区，任何一个处于休眠态就提示。
+# WINDOWS_PART 可以指定分区来缩小范围（留空则自动探测）。
+detect_ntfs_partitions() {
+    if [ -n "${WINDOWS_PART:-}" ]; then
+        printf '%s\n' "$WINDOWS_PART"
+        return 0
+    fi
+    # --raw 去掉树形前缀字符，否则会得到 "/dev/├─nvme0n1p3" 这种坏路径
+    lsblk --raw -no NAME,FSTYPE 2>/dev/null \
+        | awk '$2 ~ /^ntfs/ { print "/dev/" $1 }' || true
+}
+
+check_hibernation() {
+    local part sec
+    while read -r part; do
+        [ -n "$part" ] || continue
+        [ -b "$part" ] || continue
+        sec="$(sudo -n /usr/bin/sh -c "dd if=${part} bs=1 skip=3 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n'" 2>/dev/null || true)"
+        if [ "$sec" = "c1" ]; then
+            c_yellow "注意：${part} 处于休眠/快速启动状态（boot sector = 0xC1）。"
+            c_yellow "建议在 Windows 里关掉快速启动：管理员 PowerShell 执行 powercfg /h off"
+        fi
+    done <<< "$(detect_ntfs_partitions)"
+    return 0
+}
+
+# GUI 确认框；有 zenity 就用，没有就直接放行
+confirm_gui() {
+    command -v zenity >/dev/null 2>&1 || return 0
+    zenity --question \
+        --title="重启到 Windows" \
+        --text="将重启并进入 Windows。\n\n从 Windows 再开机会自动回到本机 Linux（一次性切换）。" \
+        --ok-label="重启到 Windows" \
+        --cancel-label="取消" \
+        --width=420 --height=180
+}
+
+do_switch() {
+    if [ "$DRY" = "1" ]; then
+        c_yellow "[dry-run] 将设置 EFI BootNext → Windows"
+        [ "$REBOOT" = "1" ] && c_yellow "[dry-run] 随后重启系统"
+        return 0
+    fi
+
+    # 确认：
+    #   --gui            → zenity 对话框
+    #   交互式终端        → [y/N] 提示
+    #   其它（GUI 菜单无 zenity）→ 直接执行
+    if [ "$MODE" = "gui" ]; then
+        if ! confirm_gui; then
+            c_yellow "已取消。"
+            return 0
+        fi
+    elif [ -t 0 ] && [ "$ASSUME_YES" != "1" ]; then
+        printf '重启进入 Windows？[y/N] '
+        read -r reply
+        case "$reply" in
+            y|Y|yes|YES) ;;
+            *) c_yellow "已取消。"; return 0 ;;
+        esac
+    fi
+
+    do_set_next
+    check_hibernation
+    c_green "已设置一次性启动 → Windows"
+    notify "已切换到 Windows，正在重启……" normal
+
+    if [ "$REBOOT" = "1" ]; then
+        c_yellow "正在重启……"
+        sleep "$REBOOT_DELAY"
+        # systemctl 在 sudoers 免密白名单里；直接调它比走 org.freedesktop.login1
+        # 更稳（polkit 没有认证 agent 在跑）。
+        run_root "systemctl reboot" || {
+            c_red "自动重启失败，请手动重启。"
+            notify "自动重启失败，请手动重启。" critical
+            return 1
+        }
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# 参数解析
+# ---------------------------------------------------------------------------
+ACTION="switch"
+MODE="auto"
+DRY="0"
+REBOOT="1"
+ASSUME_YES="0"
+
+if [ $# -eq 0 ]; then
+    ACTION="switch"
+else
+    for a in "$@"; do
+        case "$a" in
+            --status)    ACTION="status" ;;
+            --restore)   ACTION="restore" ;;
+            --no-reboot) REBOOT="0" ;;
+            --gui)       MODE="gui" ;;
+            --yes|-y)    ASSUME_YES="1" ;;
+            --dry-run)   DRY="1" ;;
+            -h|--help)   usage; exit 0 ;;
+            *) c_red "未知参数: $a"; usage; exit 2 ;;
+        esac
+    done
+fi
+
+case "$ACTION" in
+    status)  do_status ;;
+    restore) do_restore ;;
+    switch)  do_switch ;;
+esac
