@@ -104,7 +104,7 @@ Categories=System;
 1. **免密 sudo**（推荐，零配置）—— 在 sudoers 里加一行：
 
    ```
-   lrwy ALL=(ALL) NOPASSWD: /usr/bin/sh
+   <你的用户名> ALL=(ALL) NOPASSWD: /usr/bin/sh
    ```
 
    注意：**不要**写成 `/usr/bin/sh ""`。man sudoers 里 `""` 表示"只允许无参数调用"，会把带参数的调用全挡掉。
